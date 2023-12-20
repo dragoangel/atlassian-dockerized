@@ -3,26 +3,30 @@ version: "3.3"
 services:
   traefik:
     container_name: traefik
-    image: traefik:2.5
+    image: traefik:3.0
     restart: unless-stopped
     stop_grace_period: 30s
     command:
       - "--api.dashboard=${TRAEFIK_DASHBOARD_ENABLED:-false}"
       - "--log.level=${TRAEFIK_LOG_LEVEL:-ERROR}"
       - "--providers.docker=true"
-      - "--ping=true"
       - "--entrypoints.ping.address=:8080"
+      - "--ping=true"
       - "--ping.entrypoint=ping"
+      - "--entrypoints.metrics.address=:8082"
+      - "--metrics.prometheus=true"
+      - "--metrics.prometheus.addrouterslabels=true"
+      - "--metrics.prometheus.entrypoint=metrics"
       - "--providers.docker.network=atlassian-network"
       - "--providers.docker.exposedbydefault=false"
       - "--global.checknewversion=false"
       - "--global.sendanonymoususage=false"
-      - "--experimental.http3=${TRAEFIK_EXPERIMENTAL_HTTP3:-true}"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
       - "--entrypoints.websecure.address=:443"
-      - "--entrypoints.websecure.enablehttp3=${TRAEFIK_EXPERIMENTAL_HTTP3:-true}"
+      - "--entrypoints.websecure.http3"
+      - "--entrypoints.websecure.http3.advertisedport=443"
       - "--entrypoints.bitbucket-ssh.address=:7999"
       - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
       - "--certificatesresolvers.le.acme.email=${TRAEFIK_ACME_EMAIL:-john.doe@example.com}"
@@ -38,27 +42,24 @@ services:
       - "traefik.http.middlewares.traefik-auth.basicauth.realm=Traefik API"
       - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_CREDENTIALS:-traefik:traefik}"
       - "traefik.http.middlewares.traefik-auth.basicauth.removeheader=true"
-      - "traefik.http.middlewares.secure-headers.headers.framedeny=true"
-      - "traefik.http.middlewares.secure-headers.headers.contenttypenosniff=true"
-      - "traefik.http.middlewares.secure-headers.headers.browserxssfilter=true"
-      - "traefik.http.middlewares.compress.compress=true"
-      - "traefik.http.routers.traefik-dashboard.rule=Host(`${TRAEFIK_DASHBOARD_HOST:-traefik.example.com}`)"
-      - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
-      - "traefik.http.routers.traefik-dashboard.tls=true"
-      - "traefik.http.routers.traefik-dashboard.tls.certresolver=le"
-      - "traefik.http.routers.traefik-dashboard.service=api@internal"
-      - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth,secure-headers,compress"
+      - "traefik.http.routers.traefik.rule=Host(`${TRAEFIK_DASHBOARD_HOST:-traefik.example.com}`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls=true"
+      - "traefik.http.routers.traefik.tls.certresolver=le"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.middlewares=traefik-auth"
     ports:
       - "80:80"
       - "443:443/tcp"
       - "443:443/udp"
       - "7999:7999"
+      - "8082:8082" # /metrics
     environment:
       TZ: ${TZ:-Etc/UTC}
       CF_API_EMAIL: ${CF_API_EMAIL:-}
       CF_API_KEY: ${CF_API_KEY:-}
     volumes:
-      - letsencrypt-data:/letsencrypt:Z
+      - letsencrypt-data:/letsencrypt
       - /var/run/docker.sock:/var/run/docker.sock:ro,Z
     healthcheck:
       test: ["CMD", "/usr/local/bin/traefik", "healthcheck", "--ping"]
@@ -74,7 +75,7 @@ services:
   
   postgres:
     container_name: postgres
-    image: postgres:11-alpine
+    image: postgres:14-alpine
     restart: unless-stopped
     stop_grace_period: 30s
     environment:
@@ -94,7 +95,7 @@ services:
       JIRA_DB_USER: ${JIRA_DB_USER:-jira}
       JIRA_DB_PASSWORD: ${JIRA_DB_PASSWORD:-jira}
     volumes:
-      - postgres-data:/var/lib/postgresql/data:Z
+      - postgres-data:/var/lib/postgresql/data
       - ./initdb.d:/docker-entrypoint-initdb.d:ro,Z
     ulimits:
       nproc: 65535
@@ -114,17 +115,22 @@ services:
   
   bitbucket:
     container_name: bitbucket
-    image: atlassian/bitbucket:7.16-jdk8
+    image: atlassian/bitbucket:8.9
     restart: unless-stopped
     stop_grace_period: 1m30s
     labels:
       - "traefik.enable=true"
+      - "traefik.http.middlewares.bitbucket-secure-headers.headers.framedeny=true"
+      - "traefik.http.middlewares.bitbucket-secure-headers.headers.contenttypenosniff=true"
+      - "traefik.http.middlewares.bitbucket-secure-headers.headers.browserxssfilter=true"
+      - "traefik.http.middlewares.bitbucket-gzip-compression.compress=true"
+      - "traefik.http.middlewares.bitbucket-gzip-compression.compress.excludedcontenttypes=text/event-stream"
       - "traefik.http.routers.bitbucket-web.rule=Host(`${BITBUCKET_HOSTNAME:-bitbucket.example.com}`)"
       - "traefik.http.routers.bitbucket-web.entrypoints=websecure"
       - "traefik.http.routers.bitbucket-web.tls=true"
       - "traefik.http.routers.bitbucket-web.tls.certresolver=le"
       - "traefik.http.routers.bitbucket-web.service=bitbucket-web"
-      - "traefik.http.routers.bitbucket-web.middlewares=secure-headers,compress"
+      - "traefik.http.routers.bitbucket-web.middlewares=bitbucket-secure-headers,bitbucket-gzip-compression"
       - "traefik.http.services.bitbucket-web.loadbalancer.server.port=7990"
       - "traefik.tcp.routers.bitbucket-ssh.rule=HostSNI(`*`)"
       - "traefik.tcp.routers.bitbucket-ssh.entrypoints=bitbucket-ssh"
@@ -147,8 +153,9 @@ services:
       FEATURE_PERSONAL_REPOS: ${BITBUCKET_FEATURE_PERSONAL_REPOS:-false}
       FEATURE_PUBLIC_ACCESS: ${BITBUCKET_FEATURE_PUBLIC_ACCESS:-false}
       PAGE_MAX_CHANGES: ${BITBUCKET_PAGE_MAX_CHANGES:-1000}
+      ATLASSIAN_DIR: /opt/atlassian/bitbucket/app/WEB-INF/lib
     volumes:
-      - bitbucket-data:/var/atlassian/application-data/bitbucket:Z
+      - bitbucket-data:/var/atlassian/application-data/bitbucket
       - ./shared:/var/atlassian/shared:Z
     depends_on:
      - postgres
@@ -160,24 +167,29 @@ services:
   
   confluence:
     container_name: confluence
-    image: atlassian/confluence:7.13
+    image: atlassian/confluence:8.5
     restart: unless-stopped
     stop_grace_period: 1m30s
     labels:
       - "traefik.enable=true"
+      - "traefik.http.middlewares.confluence-secure-headers.headers.framedeny=true"
+      - "traefik.http.middlewares.confluence-secure-headers.headers.contenttypenosniff=true"
+      - "traefik.http.middlewares.confluence-secure-headers.headers.browserxssfilter=true"
+      - "traefik.http.middlewares.confluence-gzip-compression.compress=true"
+      - "traefik.http.middlewares.confluence-gzip-compression.compress.excludedcontenttypes=text/event-stream"
       - "traefik.http.routers.confluence-web.rule=Host(`${CONFLUENCE_HOSTNAME:-confluence.example.com}`) && !PathPrefix(`/synchrony/`)"
       - "traefik.http.routers.confluence-web.entrypoints=websecure"
       - "traefik.http.routers.confluence-web.tls=true"
       - "traefik.http.routers.confluence-web.tls.certresolver=le"
       - "traefik.http.routers.confluence-web.service=confluence-web"
-      - "traefik.http.routers.confluence-web.middlewares=secure-headers,compress"
+      - "traefik.http.routers.confluence-web.middlewares=confluence-secure-headers,confluence-gzip-compression"
       - "traefik.http.services.confluence-web.loadbalancer.server.port=8090"
       - "traefik.http.routers.confluence-synchrony.rule=Host(`${CONFLUENCE_HOSTNAME:-confluence.example.com}`) && PathPrefix(`/synchrony/`)"
       - "traefik.http.routers.confluence-synchrony.entrypoints=websecure"
       - "traefik.http.routers.confluence-synchrony.tls=true"
       - "traefik.http.routers.confluence-synchrony.tls.certresolver=le"
       - "traefik.http.routers.confluence-synchrony.service=confluence-synchrony"
-      - "traefik.http.routers.confluence-synchrony.middlewares=secure-headers,compress"
+      - "traefik.http.routers.confluence-synchrony.middlewares=confluence-secure-headers,confluence-gzip-compression"
       - "traefik.http.services.confluence-synchrony.loadbalancer.server.port=8091"
     environment:
       TZ: ${TZ:-Etc/UTC}
@@ -193,8 +205,9 @@ services:
       ATL_JDBC_URL: jdbc:postgresql://postgres:5432/${CONFLUENCE_DB_NAME:-confluence}
       ATL_JDBC_USER: ${CONFLUENCE_DB_USER:-confluence}
       ATL_JDBC_PASSWORD: ${CONFLUENCE_DB_PASSWORD:-confluence}
+      ATLASSIAN_DIR: /opt/atlassian/confluence/confluence/WEB-INF/lib
     volumes:
-      - confluence-data:/var/atlassian/application-data/confluence:Z
+      - confluence-data:/var/atlassian/application-data/confluence
       - ./shared:/var/atlassian/shared:Z
     depends_on:
      - postgres
@@ -206,17 +219,22 @@ services:
   
   crowd:
     container_name: crowd
-    image: atlassian/crowd:4.3
+    image: atlassian/crowd:5.2
     restart: unless-stopped
     stop_grace_period: 1m30s
     labels:
       - "traefik.enable=true"
+      - "traefik.http.middlewares.crowd-web-secure-headers.headers.framedeny=true"
+      - "traefik.http.middlewares.crowd-web-secure-headers.headers.contenttypenosniff=true"
+      - "traefik.http.middlewares.crowd-web-secure-headers.headers.browserxssfilter=true"
+      - "traefik.http.middlewares.crowd-web-gzip-compression.compress=true"
+      - "traefik.http.middlewares.crowd-web-gzip-compression.compress.excludedcontenttypes=text/event-stream"
       - "traefik.http.routers.crowd-web.rule=Host(`${CROWD_HOSTNAME:-crowd.example.com}`)"
       - "traefik.http.routers.crowd-web.entrypoints=websecure"
       - "traefik.http.routers.crowd-web.tls=true"
       - "traefik.http.routers.crowd-web.tls.certresolver=le"
       - "traefik.http.routers.crowd-web.service=crowd-web"
-      - "traefik.http.routers.crowd-web.middlewares=secure-headers,compress"
+      - "traefik.http.routers.crowd-web.middlewares=crowd-web-secure-headers,crowd-web-gzip-compression"
       - "traefik.http.services.crowd-web.loadbalancer.server.port=8095"
     environment:
       TZ: ${TZ:-Etc/UTC}
@@ -227,8 +245,9 @@ services:
       ATL_PROXY_PORT: "443"
       ATL_TOMCAT_SCHEME: https
       ATL_TOMCAT_SECURE: "true"
+      ATLASSIAN_DIR: /opt/atlassian/crowd/crowd-webapp/WEB-INF/lib
     volumes:
-      - crowd-data:/var/atlassian/application-data/crowd:Z
+      - crowd-data:/var/atlassian/application-data/crowd
       - ./shared:/var/atlassian/shared:Z
     depends_on:
      - postgres
@@ -240,17 +259,22 @@ services:
   
   jira:
     container_name: jira
-    image: atlassian/jira-software:8.19
+    image: atlassian/jira-software:9.12
     restart: unless-stopped
     stop_grace_period: 1m30s
     labels:
       - "traefik.enable=true"
+      - "traefik.http.middlewares.jira-secure-headers.headers.framedeny=true"
+      - "traefik.http.middlewares.jira-secure-headers.headers.contenttypenosniff=true"
+      - "traefik.http.middlewares.jira-secure-headers.headers.browserxssfilter=true"
+      - "traefik.http.middlewares.jira-gzip-compression.compress=true"
+      - "traefik.http.middlewares.jira-gzip-compression.compress.excludedcontenttypes=text/event-stream"
       - "traefik.http.routers.jira-web.rule=Host(`${JIRA_HOSTNAME:-jira.example.com}`)"
       - "traefik.http.routers.jira-web.entrypoints=websecure"
       - "traefik.http.routers.jira-web.tls=true"
       - "traefik.http.routers.jira-web.tls.certresolver=le"
       - "traefik.http.routers.jira-web.service=jira-web"
-      - "traefik.http.routers.jira-web.middlewares=secure-headers,compress"
+      - "traefik.http.routers.jira-web.middlewares=jira-secure-headers,jira-gzip-compression"
       - "traefik.http.services.jira-web.loadbalancer.server.port=8080"
     environment:
       TZ: ${TZ:-Etc/UTC}
@@ -267,8 +291,9 @@ services:
       ATL_JDBC_URL: jdbc:postgresql://postgres:5432/${JIRA_DB_NAME:-jira}
       ATL_JDBC_USER: ${JIRA_DB_USER:-jira}
       ATL_JDBC_PASSWORD: ${JIRA_DB_PASSWORD:-jira}
+      ATLASSIAN_DIR: /opt/atlassian/jira/atlassian-jira/WEB-INF/lib
     volumes:
-      - jira-data:/var/atlassian/application-data/jira:Z
+      - jira-data:/var/atlassian/application-data/jira
       - ./shared:/var/atlassian/shared:Z
     depends_on:
      - postgres
